@@ -1,0 +1,8 @@
+.DS_Store
+
+# Local editor/agent tooling
+.claude/
+
+# Build artifact — regenerate with `python3 build.py`.
+# Committing it risks shipping a stale bundle that no longer matches the source.
+zippin.html

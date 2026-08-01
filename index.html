@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZIPPIN — Swiss connections you can actually catch</title>
+<meta name="description" content="An independent Swiss journey helper: surfaces tight connections a quick walker can catch, and where a Night GA lets you shorten the ticket you buy.">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">⚡</span>
+      <div>
+        <h1>ZIPPIN</h1>
+        <p class="tagline">ama<b>Z</b>e speed<b>I</b>er chea<b>P</b>er tri<b>P</b>s <b>I</b>n switzerla<b>N</b>d</p>
+      </div>
+    </div>
+    <p class="unofficial">Independent project — not affiliated with SBB</p>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <form id="search" class="card search" autocomplete="off">
+    <div class="field-row">
+      <div class="field station-field">
+        <label for="from">From</label>
+        <input id="from" name="from" type="text" placeholder="Lausanne" required
+               role="combobox" aria-expanded="false" aria-controls="from-list" aria-autocomplete="list">
+        <ul id="from-list" class="suggestions" role="listbox" hidden></ul>
+      </div>
+
+      <button type="button" id="swap" class="swap" title="Swap origin and destination" aria-label="Swap origin and destination">⇅</button>
+
+      <div class="field station-field">
+        <label for="to">To</label>
+        <input id="to" name="to" type="text" placeholder="Zürich HB" required
+               role="combobox" aria-expanded="false" aria-controls="to-list" aria-autocomplete="list">
+        <ul id="to-list" class="suggestions" role="listbox" hidden></ul>
+      </div>
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label for="timemode">Time</label>
+        <select id="timemode">
+          <option value="depart" selected>Depart at</option>
+          <option value="arrive">Arrive by</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="date">Date</label>
+        <input id="date" name="date" type="date" required>
+      </div>
+      <div class="field">
+        <label for="time" id="time-label">Departure</label>
+        <input id="time" name="time" type="time" required>
+      </div>
+      <button type="submit" class="go">Search</button>
+    </div>
+
+    <details class="more">
+      <summary><span class="summary-label">More options</span></summary>
+      <div class="more-body">
+        <div class="field-row">
+          <div class="field station-field">
+            <label for="via">Via (optional)</label>
+            <input id="via" type="text" placeholder="e.g. Bern"
+                   role="combobox" aria-expanded="false" aria-controls="via-list" aria-autocomplete="list">
+            <ul id="via-list" class="suggestions" role="listbox" hidden></ul>
+          </div>
+          <div class="field">
+            <label for="limit">Results</label>
+            <select id="limit">
+              <option value="4">4</option>
+              <option value="6" selected>6</option>
+              <option value="10">10</option>
+            </select>
+          </div>
+        </div>
+
+        <fieldset class="modes">
+          <legend>Transport</legend>
+          <label class="inline-check"><input type="checkbox" class="mode" value="train" checked><span>Train</span></label>
+          <label class="inline-check"><input type="checkbox" class="mode" value="tram" checked><span>Tram</span></label>
+          <label class="inline-check"><input type="checkbox" class="mode" value="bus" checked><span>Bus</span></label>
+          <label class="inline-check"><input type="checkbox" class="mode" value="ship" checked><span>Boat</span></label>
+          <label class="inline-check"><input type="checkbox" class="mode" value="cableway" checked><span>Cable car</span></label>
+        </fieldset>
+
+        <label class="inline-check">
+          <input type="checkbox" id="direct-only">
+          <span>Direct connections only</span>
+        </label>
+      </div>
+    </details>
+
+    <div class="field hurry">
+      <label for="hurry">
+        Hurry factor
+        <span class="hurry-value" id="hurry-label">Quick — 4 min changes</span>
+      </label>
+      <input id="hurry" type="range" min="0" max="4" step="1" value="1"
+             aria-describedby="hurry-help">
+      <div class="ticks" aria-hidden="true">
+        <span>Normal</span><span>Quick</span><span>Brisk</span><span>Sprint</span><span>ZIPPIN</span>
+      </div>
+      <p class="help" id="hurry-help">
+        Above <em>Normal</em>, ZIPPIN re-checks every change against the live timetable and shows
+        connections the official search hides because it assumes a slower walker.
+        The floor is the real gap between arriving and the onward train leaving.
+      </p>
+      <p class="warn" id="extreme-warn" hidden>
+        ⚠️ <strong>ZIPPIN mode allows zero-minute changes.</strong> A train leaving the same
+        minute you arrive is not catchable unless it is across the same platform — and often not
+        even then. Each one is labelled, and every result tells you what to do if you miss it.
+      </p>
+    </div>
+
+    <details class="nightga">
+      <summary>
+        <label class="inline-check">
+          <input type="checkbox" id="nightga-on">
+          <span>I have a Night GA (+ Half Fare)</span>
+        </label>
+      </summary>
+      <div class="nightga-body">
+        <p class="help">
+          Free travel inside the night window means you only buy the part of the trip
+          <em>before</em> it opens. ZIPPIN reads the stop sequence and tells you which station
+          to buy to.
+        </p>
+        <div class="field-row">
+          <div class="field">
+            <label for="night-start">Window opens</label>
+            <input id="night-start" type="time" value="19:00">
+          </div>
+          <div class="field">
+            <label for="night-end">Window closes</label>
+            <input id="night-end" type="time" value="05:00">
+          </div>
+        </div>
+      </div>
+    </details>
+  </form>
+
+  <div class="statusbar">
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+    <button type="button" id="share" class="share" hidden>🔗 Copy link to this search</button>
+  </div>
+  <section id="results" class="results"></section>
+
+</main>
+
+<footer class="wrap foot">
+  <p>
+    Timetable data from <a href="https://transport.opendata.ch" target="_blank" rel="noopener">transport.opendata.ch</a>.
+    Prices and purchases always happen on sbb.ch — ZIPPIN never handles fares or payment.
+  </p>
+  <p class="fine">
+    Independent hobby project built on public open data. Not affiliated with, endorsed by, or
+    connected to SBB CFF FFS.
+    Live delays are not applied; always confirm tight changes on the platform display.
+  </p>
+</footer>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
