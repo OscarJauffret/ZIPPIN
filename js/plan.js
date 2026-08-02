@@ -455,7 +455,20 @@ export function rankNightPlans(journeys, startMin, endMin) {
   };
 }
 
-/** Deep link into SBB's own timetable, prefilled, so the real price is shown there. */
+/**
+ * Deep link into SBB's own timetable, prefilled, so the real price is shown there.
+ *
+ * SBB has no URL for an individual connection: expanding one on their site does
+ * not change the address, because the connection is held client side behind a
+ * backend token we cannot construct. The closest achievable is to anchor the
+ * search on the exact departure minute, which puts the intended trip first in
+ * the list — so callers should also show its times, letting the traveller
+ * recognise the row on arrival.
+ *
+ * Only the four parameters verified to work are sent. Extra ones are a real
+ * risk: a link that silently lands on an empty search is worse than one that
+ * lands on a list.
+ */
 export function sbbLink(from, to, ts) {
   const q = new URLSearchParams({
     von: from.name,

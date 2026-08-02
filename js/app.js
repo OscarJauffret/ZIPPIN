@@ -289,11 +289,14 @@ function renderNightPanel(journey, cfg) {
       ]),
     ]);
     if (!s.covered) {
+      // The times, not the station names, are what identify the row on SBB —
+      // the route is already on the line above, and SBB cannot be linked to a
+      // single connection, so it opens on a list anchored at this minute.
       row.querySelector('.stretch-body').append(el('a', {
         class: 'buy small',
         href: sbbLink(s.from, s.to, s.depTs),
         target: '_blank', rel: 'noopener',
-        text: `Check price ${s.from.name} → ${s.to.name}`,
+        text: `Check price on SBB  ·  ${fmtTime(s.depTs)} → ${fmtTime(s.arrTs)}`,
       }));
     }
     list.append(row);
@@ -304,14 +307,15 @@ function renderNightPanel(journey, cfg) {
     class: 'buy ghost',
     href: sbbLink(journey.from, journey.to, journey.depTs),
     target: '_blank', rel: 'noopener',
-    text: `Compare: one ticket for the whole trip (${journey.from.name} → ${journey.to.name})`,
+    text: `Compare: one ticket for the whole trip  ·  ${fmtTime(journey.depTs)} → ${fmtTime(journey.arrTs)}`,
   }));
 
   panel.append(el('p', {
     class: 'caveat',
-    text: 'ZIPPIN never shows fares. Several short tickets are not always cheaper than '
-      + 'one long one, so check both on SBB, and confirm the split matches your Night '
-      + 'GA’s own terms.',
+    text: 'SBB has no link to one specific connection, so these open its search at that '
+      + 'exact minute — your trip is the first result, matching the times on the button. '
+      + 'ZIPPIN never shows fares: several short tickets are not always cheaper than one '
+      + 'long one, so check both, and confirm the split matches your Night GA’s own terms.',
   }));
 
   return { panel, plan };
@@ -554,7 +558,7 @@ function renderNightCompare(options, badged) {
         class: 'buy small',
         href: sbbLink(s.from, s.to, s.depTs),
         target: '_blank', rel: 'noopener',
-        text: `Check ${s.from.name} → ${s.to.name}`,
+        text: `${s.from.name} → ${s.to.name}  ·  ${fmtTime(s.depTs)}`,
       })),
     ]));
   }
