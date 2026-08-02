@@ -1,7 +1,7 @@
 import {
   ApiError, connections, connectionsArrivingBy, searchStations, stats,
 } from './api.js';
-import { findSpeedy, rankNightSplits, sbbLink } from './plan.js';
+import { findSpeedy, rankNightPlans, sbbLink } from './plan.js';
 import {
   apiDate, fmtDuration, fmtTime, nowInZurich, parseClock, todayInZurich, tsFromZurich,
 } from './time.js';
@@ -124,13 +124,34 @@ function wireCombobox(inputId, listId) {
   input.addEventListener('blur', () => setTimeout(close, 120));
 }
 
+/**
+ * Not every id the autocomplete offers can actually be routed from.
+ *
+ * Searching "Montpellier" returns the real station (8777300) alongside a city
+ * entry (0000199, icon "bus"), and picking the latter yields zero connections —
+ * silently, with no hint that the id was the problem. Real stations carry a
+ * UIC-style 7-digit id beginning 8; anything else is treated as a label to be
+ * re-resolved by name.
+ */
+function isRoutableId(id) {
+  return /^8\d{6}$/.test(String(id ?? ''));
+}
+
 /** Turn whatever is in the input into the best {id, name} we can. */
 async function resolveStation(input) {
   const name = input.value.trim();
-  if (input.dataset.stationId) return { id: input.dataset.stationId, name };
+  const picked = input.dataset.stationId;
+  if (picked && isRoutableId(picked)) return { id: picked, name };
+
+  // Either nothing was picked, or what was picked can't be routed from. Fall
+  // back to the best routable match for the same text.
   try {
-    const [first] = await searchStations(name);
-    if (first) return first;
+    const found = await searchStations(name);
+    const routable = found.find((s) => isRoutableId(s.id));
+    if (routable) {
+      return { ...routable, substitutedFor: picked && routable.name !== name ? name : null };
+    }
+    if (found.length) return found[0];
   } catch { /* fall through — the API also accepts plain names */ }
   return { id: null, name };
 }
@@ -217,59 +238,83 @@ function renderChange(change) {
   return row;
 }
 
+/** Why a stretch isn't covered — the two reasons read very differently to a buyer. */
+function uncoveredReason(stretch) {
+  if (stretch.anyNonSwiss && stretch.anyOutsideWindow) {
+    return 'outside Switzerland and outside the window';
+  }
+  if (stretch.anyNonSwiss) return 'outside Switzerland — a Night GA is a Swiss pass';
+  return 'outside your night window';
+}
+
 function renderNightPanel(journey, cfg) {
   if (!cfg.on) return null;
-  // rankNightSplits already annotated every journey in this result set.
-  const split = journey.night;
-  if (!split || split.status === 'outside') return null;
+  // rankNightPlans already annotated every journey in this result set.
+  const plan = journey.night;
+  if (!plan || plan.status === 'all-paid') return null;
 
   const panel = el('div', { class: 'night-panel' }, [
     el('h4', { text: 'Night GA' }),
   ]);
 
-  if (split.status === 'covered') {
+  if (plan.status === 'all-free') {
     panel.append(el('p', {
-      text: 'This whole journey runs inside your night window — no ticket to buy.',
+      text: 'Every leg of this journey is inside Switzerland and inside your night '
+        + 'window — nothing to buy.',
     }));
-    return { panel, split };
+    return { panel, plan };
   }
 
-  panel.append(
-    el('p', {}, [
-      document.createTextNode('Buy only '),
-      el('span', { class: 'split-station', text: journey.from.name }),
-      document.createTextNode(' → '),
-      el('span', { class: 'split-station', text: split.station.name }),
-      document.createTextNode('.'),
-    ]),
-    el('p', {
-      text: `Your train (${split.ride.line}) leaves ${split.station.name} at `
-          + `${fmtTime(split.depTs)}, inside the window — everything from there on is covered.`,
-    }),
-    el('p', {
-      class: 'paid-extent',
-      text: 'You pay for roughly '
-        + [
-          split.paidKm != null ? `${Math.round(split.paidKm)} km` : null,
-          `${Math.round(split.paidSec / 60)} min`,
-        ].filter(Boolean).join(' / ')
-        + ' of travel.',
-    }),
-    el('a', {
-      class: 'buy',
-      href: sbbLink(journey.from, split.station, journey.depTs),
-      target: '_blank',
-      rel: 'noopener',
-      text: `See price & buy ${journey.from.name} → ${split.station.name} on SBB`,
-    }),
-    el('p', {
-      class: 'caveat',
-      text: 'ZIPPIN never shows fares. Check the exact Half Fare price on SBB before buying, '
-          + 'and confirm the split matches your Night GA’s own terms.',
-    }),
-  );
+  panel.append(el('p', {
+    text: plan.paid.length === 1
+      ? 'One ticket covers what the pass does not:'
+      : `${plan.paid.length} tickets cover what the pass does not — `
+        + 'changing trains inside a stretch costs nothing extra:',
+  }));
 
-  return { panel, split };
+  const list = el('ol', { class: 'stretches' });
+  for (const s of plan.stretches) {
+    const row = el('li', { class: s.covered ? 'stretch free' : 'stretch pay' }, [
+      el('span', { class: 'stretch-tag', text: s.covered ? 'FREE' : 'PAY' }),
+      el('div', { class: 'stretch-body' }, [
+        el('div', { class: 'stretch-route', text: `${s.from.name} → ${s.to.name}` }),
+        el('div', {
+          class: 'stretch-meta',
+          text: [
+            `${fmtTime(s.depTs)}–${fmtTime(s.arrTs)}`,
+            s.km != null ? `~${Math.round(s.km)} km` : null,
+            s.covered ? 'covered by your Night GA' : uncoveredReason(s),
+          ].filter(Boolean).join('  ·  '),
+        }),
+      ]),
+    ]);
+    if (!s.covered) {
+      row.querySelector('.stretch-body').append(el('a', {
+        class: 'buy small',
+        href: sbbLink(s.from, s.to, s.depTs),
+        target: '_blank', rel: 'noopener',
+        text: `Check price ${s.from.name} → ${s.to.name}`,
+      }));
+    }
+    list.append(row);
+  }
+  panel.append(list);
+
+  panel.append(el('a', {
+    class: 'buy ghost',
+    href: sbbLink(journey.from, journey.to, journey.depTs),
+    target: '_blank', rel: 'noopener',
+    text: `Compare: one ticket for the whole trip (${journey.from.name} → ${journey.to.name})`,
+  }));
+
+  panel.append(el('p', {
+    class: 'caveat',
+    text: 'ZIPPIN never shows fares. Several short tickets are not always cheaper than '
+      + 'one long one, so check both on SBB, and confirm the split matches your Night '
+      + 'GA’s own terms.',
+  }));
+
+  return { panel, plan };
 }
 
 function renderJourney(journey, cfg, { speedy = false } = {}) {
@@ -297,10 +342,19 @@ function renderJourney(journey, cfg, { speedy = false } = {}) {
     // of it would say nothing.
     const gain = Math.round((journey.gainSec || 0) / 60);
     if (!journey.headStartSec) {
+      // Hurrying and stringing together more connections are different asks, and
+      // the icon has to match: a 100-minute wait is not a sprint.
+      const icon = journey.isHurried === false ? '🔀' : '🏃';
       const text = gain > 0
-        ? (journey.gainKind === 'later' ? `🏃 leave ${gain} min later` : `🏃 ${gain} min earlier`)
-        : '🏃 Speedy';
+        ? (journey.gainKind === 'later' ? `${icon} leave ${gain} min later` : `${icon} ${gain} min earlier`)
+        : `${icon} Speedy`;
       badges.append(el('span', { class: 'badge speedy', text }));
+      if (journey.extraChanges > 0) {
+        badges.append(el('span', {
+          class: 'badge changes',
+          text: `+${journey.extraChanges} change${journey.extraChanges > 1 ? 's' : ''}`,
+        }));
+      }
     }
 
     // Surface an unrealistic change on the collapsed card too, so an EXTREME
@@ -316,8 +370,11 @@ function renderJourney(journey, cfg, { speedy = false } = {}) {
   }
 
   const nightInfo = renderNightPanel(journey, cfg);
-  if (nightInfo && nightInfo.split.status === 'split') {
-    badges.append(el('span', { class: 'badge night', text: '🌙 Shorter ticket' }));
+  if (nightInfo) {
+    badges.append(el('span', {
+      class: 'badge night',
+      text: nightInfo.plan.status === 'all-free' ? '🌙 Travel free' : '🌙 Shorter ticket',
+    }));
   }
 
   head.append(
@@ -341,11 +398,25 @@ function renderJourney(journey, cfg, { speedy = false } = {}) {
       note.textContent = `⏱ Leaves ${Math.round(journey.headStartSec / 60)} min before the time `
         + 'you asked for — yours only if you are already at the platform.';
     } else {
-      const tightened = journey.changes.filter((c) => c.officialGapSec != null);
-      note.textContent = tightened.length
-        ? `🏃 ${tightened.map((c) => `${c.station.name} in ${Math.round(c.gapSec / 60)} min `
-          + `instead of the official ${Math.round(c.officialGapSec / 60)}`).join(';  ')}`
-        : '🏃 Tighter than the standard search allows.';
+      // Two independent things can have happened. Say whichever actually did,
+      // rather than calling every improvement a sprint.
+      const lines = [];
+      const tight = journey.tightChanges || [];
+      if (tight.length) {
+        lines.push(`🏃 ${tight.map((c) => `${c.station.name} in ${Math.round(c.gapSec / 60)} min `
+          + `instead of the official ${Math.round(c.officialGapSec / 60)}`).join(';  ')}`);
+      }
+      if (journey.extraChanges > 0) {
+        const gain = Math.round((journey.gainSec || 0) / 60);
+        const gainText = gain > 0
+          ? (journey.gainKind === 'later' ? `Leave ${gain} min later ` : `Arrive ${gain} min earlier `)
+          : 'Faster ';
+        lines.push(`🔀 ${gainText}by taking ${journey.extraChanges} more `
+          + `change${journey.extraChanges > 1 ? 's' : ''} — a longer chain of connections the `
+          + 'standard search did not offer. No rushing involved.');
+      }
+      if (!lines.length) lines.push('🏃 Tighter than the standard search allows.');
+      note.replaceChildren(...lines.map((t) => el('div', { text: t })));
     }
   }
 
@@ -441,42 +512,50 @@ function makeResultList(container, cfg, arriveBy) {
 }
 
 /**
- * Both ways to shorten the ticket, side by side.
+ * Every distinct ticket plan across the result set, side by side.
  *
- * ZIPPIN ranks splits by distance because it cannot see fares — so the runner-up
- * may genuinely be cheaper. Showing one option and calling it best would be
- * claiming knowledge we don't have.
+ * ZIPPIN ranks by distance because it cannot see fares, so a runner-up may
+ * genuinely be cheaper. Every plan is listed rather than a chosen "best" — and
+ * the heading counts what is actually shown, which an earlier version got wrong
+ * by hardcoding "two" while badging every result that had a split.
  */
-function renderNightCompare(options) {
+function renderNightCompare(options, badged) {
   if (options.length < 2) return null;
 
   const card = el('div', { class: 'night-compare' }, [
-    el('h3', { text: '🌙 Two ways to shorten your ticket' }),
+    el('h3', { text: `🌙 ${options.length} ways to shorten your ticket` }),
     el('p', {
       class: 'caveat',
-      text: 'ZIPPIN can\'t see fares, so it ranks by how far you\'d pay for — usually, '
-        + 'but not always, the cheaper one. Check both on SBB before buying.',
+      text: `Across ${badged} of your results — departures needing the same tickets `
+        + 'count once here. ZIPPIN can\'t see fares, so it ranks by how far you\'d pay '
+        + 'for, usually but not always the cheaper one. Check them on SBB before buying.',
     }),
   ]);
 
   const list = el('ol', { class: 'split-options' });
-  for (const { journey, split } of options.slice(0, 2)) {
+  for (const { journey, journeys, plan } of options) {
+    const routes = plan.paid.length
+      ? plan.paid.map((s) => `${s.from.name} → ${s.to.name}`).join('  +  ')
+      : 'nothing to buy — fully covered';
     list.append(el('li', {}, [
-      el('div', { class: 'split-head', text: `${journey.from.name} → ${split.station.name}` }),
+      el('div', { class: 'split-head', text: routes }),
       el('div', {
         class: 'split-meta',
         text: [
-          split.paidKm != null ? `~${Math.round(split.paidKm)} km` : null,
-          `${Math.round(split.paidSec / 60)} min paid`,
-          `on the ${fmtTime(journey.depTs)} departure`,
+          plan.paidKm != null ? `~${Math.round(plan.paidKm)} km paid` : null,
+          plan.paid.length
+            ? `${plan.paid.length} ticket${plan.paid.length > 1 ? 's' : ''}`
+            : null,
+          `on the ${journeys.map((j) => fmtTime(j.depTs)).join(', ')} `
+            + `departure${journeys.length > 1 ? 's' : ''}`,
         ].filter(Boolean).join('  ·  '),
       }),
-      el('a', {
+      ...plan.paid.map((s) => el('a', {
         class: 'buy small',
-        href: sbbLink(journey.from, split.station, journey.depTs),
+        href: sbbLink(s.from, s.to, s.depTs),
         target: '_blank', rel: 'noopener',
-        text: 'Check this price on SBB',
-      }),
+        text: `Check ${s.from.name} → ${s.to.name}`,
+      })),
     ]));
   }
   card.append(list);
@@ -490,6 +569,10 @@ function renderNightCompare(options) {
 async function runSearch(e) {
   e?.preventDefault();
   const token = ++searchToken;
+  let substitutionNote = '';
+  // Terminal status lines lead with any station substitution, so a swapped
+  // origin is never buried under the result summary.
+  const finish = (text) => setStatus(substitutionNote ? `${substitutionNote}  ${text}` : text);
   const submit = form.querySelector('.go');
   submit.disabled = true;
   resultsEl.replaceChildren();
@@ -502,6 +585,7 @@ async function runSearch(e) {
   const hurry = HURRY[Number(hurryEl.value)];
   const arriveBy = $('#timemode').value === 'arrive';
   const directOnly = $('#direct-only').checked;
+  const maxChanges = $('#max-changes').value === '' ? null : Number($('#max-changes').value);
 
   // Only send the mode filter when it actually narrows things; all-selected is
   // the same as unset, and an empty selection would return nothing at all.
@@ -549,12 +633,25 @@ async function runSearch(e) {
 
     // The API accepts `direct` but ignores it (verified), so filter here.
     if (directOnly) base = base.filter((j) => j.transfers === 0);
+    // Speedy mode can string together long chains of connections to save time.
+    // This is the opt-out for anyone unwilling to make that trade.
+    if (maxChanges != null) base = base.filter((j) => j.transfers <= maxChanges);
 
     if (!base.length) {
       setStatus(directOnly
         ? 'No direct connections found. Untick “Direct connections only” to allow changes.'
         : 'No connections found. Check the station names or try another time.');
       return;
+    }
+
+    // If a non-routable pick (a city rather than a station) was silently swapped
+    // for a real one, say so — otherwise the results quietly describe a different
+    // journey from the one that was asked for.
+    const swapped = [from, to].filter((s) => s.substitutedFor);
+    if (swapped.length) {
+      substitutionNote = swapped
+        .map((s) => `“${s.substitutedFor}” has no departures — showing ${s.name}.`)
+        .join(' ');
     }
 
     savePrefs();
@@ -569,17 +666,17 @@ async function runSearch(e) {
     const list = makeResultList(holder, cfg, arriveBy);
     const showNight = () => {
       if (!cfg.on) return;
-      const { options } = rankNightSplits(list.journeys, cfg.start, cfg.end);
-      const card = renderNightCompare(options);
+      const { options, badged } = rankNightPlans(list.journeys, cfg.start, cfg.end);
+      const card = renderNightCompare(options, badged);
       nightSlot.replaceChildren(...(card ? [card] : []));
     };
 
-    if (cfg.on) rankNightSplits(base, cfg.start, cfg.end);
+    if (cfg.on) rankNightPlans(base, cfg.start, cfg.end);
     for (const j of base) list.add(j);
     showNight();
 
     if (hurry.gapMin == null || directOnly) {
-      setStatus(directOnly
+      finish(directOnly
         ? `${base.length} direct connections — no changes to tighten.`
         : `${base.length} connections. Raise the hurry factor to hunt for tighter changes.`);
       return;
@@ -604,7 +701,8 @@ async function runSearch(e) {
         const baseKeys = new Set(base.map((j) => j.key));
         headStarts = early.filter((j) =>
           j.depTs >= earliest && j.depTs < anchorTs && !baseKeys.has(j.key)
-          && (!directOnly || j.transfers === 0));
+          && (!directOnly || j.transfers === 0)
+          && (maxChanges == null || j.transfers <= maxChanges));
         for (const j of headStarts) {
           j.headStartSec = anchorTs - j.depTs;
           // Missing one of these just means taking the train you'd have caught anyway.
@@ -636,6 +734,7 @@ async function runSearch(e) {
       depth: 2,
       onFound: (j) => {
         if (token !== searchToken || list.has(j.key)) return;
+        if (maxChanges != null && j.transfers > maxChanges) return;
         list.add(j, { speedy: true });
       },
     });
@@ -649,7 +748,7 @@ async function runSearch(e) {
 
     const extras = [...headStarts, ...speedy];
     if (!extras.length) {
-      setStatus(
+      finish(
         `No hidden connections on this route — the standard results already take the `
         + `${arriveBy ? 'latest possible start' : 'earliest onward trains'}. `
         + `(${stats.requests} timetable queries)`,
@@ -661,14 +760,22 @@ async function runSearch(e) {
     const unrealistic = extras.filter((j) =>
       j.changes.some((c) => ['implausible', 'impossible'].includes(c.feasibility))).length;
 
+    // Counted separately: only one of these two asks the traveller to hurry.
+    const hurried = speedy.filter((j) => j.isHurried);
+    const chained = speedy.filter((j) => !j.isHurried);
+
     const parts = [];
-    if (speedy.length) {
-      const n = `${speedy.length} tighter connection${speedy.length > 1 ? 's' : ''}`;
+    if (hurried.length) {
+      const n = `${hurried.length} tighter connection${hurried.length > 1 ? 's' : ''}`;
       parts.push(best > 0
         ? `Found ${n} — ${arriveBy
           ? `you could leave up to ${Math.round(best / 60)} min later.`
           : `up to ${Math.round(best / 60)} min earlier at your destination.`}`
         : `Found ${n}.`);
+    }
+    if (chained.length) {
+      parts.push(`${chained.length} faster route${chained.length > 1 ? 's' : ''} `
+        + 'with more changes (no rushing needed).');
     }
     if (headStarts.length) {
       parts.push(`${headStarts.length} train${headStarts.length > 1 ? 's leave' : ' leaves'} `
@@ -680,7 +787,7 @@ async function runSearch(e) {
         ? '  One of them needs a change that isn\'t realistically catchable.'
         : `  ${unrealistic} of them need a change that isn't realistically catchable.`;
     }
-    setStatus(msg);
+    finish(msg);
   } catch (err) {
     if (token !== searchToken) return;
     const msg = err instanceof ApiError

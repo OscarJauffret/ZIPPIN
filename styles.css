@@ -91,12 +91,25 @@ h1 { font-size: 1.2rem; margin: 0; letter-spacing: -.01em; }
 
 input[type=text], input[type=date], input[type=time], select {
   width: 100%;
+  /* iOS gives date and time inputs a wide intrinsic min-width, which a flex item
+     honours by default — that's what pushed these past the card's right edge on
+     a phone. Both properties are needed: min-width lets the field shrink,
+     max-width stops the control itself from spilling out. */
+  min-width: 0;
+  max-width: 100%;
   padding: .6rem .7rem;
   font: inherit;
   color: var(--text);
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 10px;
+}
+/* Safari sizes these from the value rather than the box without it. */
+input[type=date]::-webkit-date-and-time-value,
+input[type=time]::-webkit-date-and-time-value {
+  text-align: left;
+  min-width: 0;
+  max-width: 100%;
 }
 input:focus-visible, button:focus-visible, summary:focus-visible {
   outline: 2px solid var(--accent);
@@ -214,14 +227,15 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
 
 .journey {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 2px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   overflow: hidden;
 }
-/* Speedy results carry a coloured edge as well as a badge, so they stand out
-   while sitting in the same arrival-ordered list as everything else. */
-.journey.is-speedy { border-color: var(--speedy); border-left-width: 4px; }
+/* Speedy results are picked out by border colour alone. Thickening one side
+   made the frame visibly lopsided, and changing width between states also
+   shifted the card's layout, so every card keeps the same 2px on all four. */
+.journey.is-speedy { border-color: var(--speedy); }
 .journey.is-risky { border-color: var(--accent); }
 
 .j-note {
@@ -256,6 +270,8 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
   padding: .2rem .5rem; border-radius: 999px; white-space: nowrap;
 }
 .badge.speedy { background: var(--speedy-soft); color: var(--speedy); }
+/* "More changes" is a cost, not a win — muted rather than green. */
+.badge.changes { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
 .badge.night { background: var(--night-soft); color: var(--night); }
 .badge.risky { background: var(--accent-soft); color: var(--accent); }
 
@@ -332,6 +348,29 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
 .night-panel h4 { margin: 0; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: var(--night); }
 .night-panel p { margin: 0; }
 .night-panel .split-station { font-weight: 700; }
+
+/* Each stretch of the journey, marked FREE or PAY. Contiguous stretches are
+   already merged, so one PAY row means exactly one ticket to buy. */
+.stretches { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+.stretch { display: flex; gap: .6rem; align-items: flex-start; }
+.stretch-tag {
+  flex: 0 0 auto;
+  font-size: .64rem; font-weight: 800; letter-spacing: .07em;
+  padding: .2rem .4rem; border-radius: 5px; margin-top: .1rem;
+}
+.stretch.free .stretch-tag { background: var(--speedy-soft); color: var(--speedy); }
+.stretch.pay .stretch-tag { background: var(--accent-soft); color: var(--accent); }
+.stretch-body { min-width: 0; display: grid; gap: .15rem; }
+.stretch-route { font-weight: 650; font-size: .87rem; }
+.stretch-meta { font-size: .76rem; opacity: .85; }
+.stretch .buy.small { margin-top: .25rem; }
+
+.buy.ghost {
+  background: none;
+  border: 1px solid currentColor;
+  color: var(--night);
+  font-weight: 600;
+}
 .buy {
   justify-self: start;
   display: inline-block; text-decoration: none;

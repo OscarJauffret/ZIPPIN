@@ -28,6 +28,18 @@ import { apiDate, fmtTime, minutesOfDay, swissDate } from './time.js';
 
 const MAX_SUBQUERIES = 24; // keeps a single search well inside the public rate limit
 
+/**
+ * Above this, a change is a wait, not a hurry.
+ *
+ * The splice only requires the new gap to beat the old one, which says nothing
+ * about whether hurrying is involved: shortening a 160-minute layover at
+ * Annemasse to 100 minutes is a real improvement and a genuinely faster journey,
+ * but dressing it up as "you'll do it in 100 😎" is nonsense. Results are
+ * therefore classified, not filtered — anything above this ceiling is presented
+ * as a longer chain of connections, which is what it actually is.
+ */
+export const TIGHT_GAP_SEC = 12 * 60;
+
 /** Leg-array index of the n-th ride leg. */
 function rideLegIndex(journey, n) {
   let seen = 0;
@@ -127,6 +139,29 @@ export async function findSpeedy({
   const from = origin.id || origin.name;
   const dest = destination.id || destination.name;
 
+  /**
+   * The gain a traveller actually experiences: how much this beats the best
+   * standard result they could still choose instead.
+   *
+   * Measuring against the branch's own root overstates it. A variant of the
+   * 08:28 arrival can land at 05:28 and be called "180 min earlier" while a
+   * standard result already arrives 05:28 — two cards, identical times, one
+   * claiming a three-hour saving. Comparing against every standard option not
+   * already ruled out by the clock avoids that.
+   */
+  function realGain(candidate, root) {
+    if (arriveBy) {
+      // Only starts that still meet the deadline compete.
+      const rivals = baseJourneys.filter((b) => b.arrTs <= candidate.arrTs);
+      const latest = rivals.length ? Math.max(...rivals.map((b) => b.depTs)) : root.depTs;
+      return candidate.depTs - latest;
+    }
+    // Leaving earlier than the candidate isn't an option, so those don't compete.
+    const rivals = baseJourneys.filter((b) => b.depTs >= candidate.depTs);
+    const earliest = rivals.length ? Math.min(...rivals.map((b) => b.arrTs)) : root.arrTs;
+    return earliest - candidate.arrTs;
+  }
+
   // `root` is the standard result this branch started from. Gains are measured
   // against that, not against the best standard result overall — a speedy variant
   // of the 09:00 departure should be compared with the 09:00 departure.
@@ -188,10 +223,26 @@ export async function findSpeedy({
         if (seen.has(candidate.key)) continue;
         seen.add(candidate.key);
 
+        // Beating the journey it was spliced from isn't enough — it has to beat
+        // everything the standard search already offered, or it is not a find.
+        const gainSec = realGain(candidate, root);
+        if (gainSec <= 0) {
+          // Still worth recursing: a deeper splice off this one may yet win.
+          await improve(candidate, level + 1, root);
+          continue;
+        }
+
+        // What did this actually cost the traveller? A tightened change asks them
+        // to hurry; extra changes ask them to sit through more connections. The
+        // two are independent, and a result can involve both or neither.
+        candidate.tightChanges = candidate.changes.filter(
+          (c) => c.officialGapSec != null && c.gapSec <= TIGHT_GAP_SEC,
+        );
+        candidate.isHurried = candidate.tightChanges.length > 0;
+        candidate.extraChanges = candidate.transfers - root.transfers;
+
         candidate.gainKind = arriveBy ? 'later' : 'earlier';
-        candidate.gainSec = arriveBy
-          ? candidate.depTs - root.depTs   // leave this much later
-          : root.arrTs - candidate.arrTs;  // arrive this much earlier
+        candidate.gainSec = gainSec;
         found.set(candidate.key, candidate);
         onFound?.(candidate);
 
@@ -213,59 +264,55 @@ export async function findSpeedy({
 // ---------------------------------------------------------------------------
 // 2. Night-GA / partial-ticket helper
 // ---------------------------------------------------------------------------
+//
+// A Night GA covers travel that is BOTH inside Switzerland and inside the night
+// window. Neither condition alone is enough, and an earlier version checked only
+// the second — which declared a Montpellier→Paris→Zürich journey "fully covered"
+// because it happened to leave at 19:50.
+//
+// So coverage is worked out per stop-to-stop segment, then contiguous runs are
+// merged. Merging deliberately crosses train changes: if you ride A→F→M→Z and
+// only H→L is covered, that is two tickets (A→H and L→Z), not four. Changing
+// trains inside a paid stretch costs nothing extra and buying fewer, longer
+// tickets is more robust if a train is cancelled.
+
+/** Swiss stations are UIC 85xxxxx. France is 87, Germany 80, Italy 83, Austria 81. */
+function isSwiss(station) {
+  return /^85/.test(String(station?.id ?? ''));
+}
 
 /** Is a Zurich-local minute-of-day inside the night window? Handles wraparound. */
 function inWindow(m, start, end) {
   return start <= end ? (m >= start && m < end) : (m >= start || m < end);
 }
 
+/**
+ * Real stations carry a UIC-style id: 8 followed by six digits (85… Swiss,
+ * 87… French, and so on). Stop lists also contain operational waypoints such as
+ * "Bahn-2000-Strecke" (id 0000132) — stretches of track, not places, and
+ * certainly not somewhere you can buy a ticket to.
+ */
+function isTicketableStop(s) {
+  return /^8\d{6}$/.test(String(s?.id ?? ''));
+}
+
 /** Ordered stop sequence across every ride leg, with the leg each stop belongs to. */
 function stopSequence(journey) {
   const out = [];
   for (const ride of journey.rides) {
-    const stops = ride.passList.length
+    const raw = ride.passList.length
       ? ride.passList
       : [
           { ...ride.from, depTs: ride.depTs, arrTs: null },
           { ...ride.to, depTs: null, arrTs: ride.arrTs },
         ];
-    for (const s of stops) out.push({ ...s, ride });
+    // Left in, a waypoint reads as "not Swiss" and splits a covered stretch at a
+    // boundary that doesn't exist — which is how Solothurn → Olten, entirely
+    // inside Switzerland, came out as a stretch needing a ticket.
+    const clean = raw.filter(isTicketableStop);
+    for (const s of (clean.length >= 2 ? clean : raw)) out.push({ ...s, ride });
   }
   return out;
-}
-
-/**
- * Find the station where the ticket can stop: the first stop the train departs
- * once the night window has opened. Everything from there on is covered by the
- * Night GA, so only A → that station needs buying.
- *
- * @returns {{status: string, ...}} status is one of:
- *   'covered'  — the journey is already inside the window at departure
- *   'outside'  — no part of the journey falls in the window
- *   'split'    — buy from origin to `station`
- */
-export function nightSplit(journey, windowStartMin, windowEndMin) {
-  const stops = stopSequence(journey);
-  const departures = stops.filter((s) => s.depTs != null);
-  if (!departures.length) return { status: 'outside' };
-
-  const hit = departures.find((s) => inWindow(minutesOfDay(s.depTs), windowStartMin, windowEndMin));
-  if (!hit) return { status: 'outside' };
-
-  // The very first departure is already in the window — nothing to buy.
-  if (hit.depTs === departures[0].depTs && hit.name === departures[0].name) {
-    return { status: 'covered', from: journey.from, depTs: journey.depTs };
-  }
-
-  // Coordinates ride along: rankNightSplits uses distance as its fare proxy.
-  const station = { id: hit.id, name: hit.name, lat: hit.lat, lon: hit.lon };
-  return {
-    status: 'split',
-    station,
-    depTs: hit.depTs,
-    ride: hit.ride,
-    buy: { from: journey.from, to: station },
-  };
 }
 
 /** Great-circle km between two stations, or null if either lacks coordinates. */
@@ -281,73 +328,130 @@ function distanceKm(a, b) {
 }
 
 /**
- * Track kilometres from the origin to the split, summed stop to stop.
+ * Split a journey into consecutive stretches, each either covered by the Night
+ * GA or needing a ticket.
  *
- * Straight-line origin→split distance is a bad proxy for a rail fare: two split
- * stations can sit the same distance from the origin as the crow flies while the
- * routes to them differ substantially. Following the actual stop sequence tracks
- * what you'd be charged for far more closely.
+ * @returns {{status: string, stretches: object[], paid: object[], paidKm: number|null,
+ *            freeSec: number, planKey: string}}
+ *   status is 'all-free' (buy nothing), 'all-paid' (the pass never applies) or
+ *   'partial' (buy the paid stretches only).
  */
-function paidRouteKm(journey, splitDepTs) {
+export function nightCoverage(journey, startMin, endMin) {
   const stops = stopSequence(journey);
-  let km = 0;
-  let prev = null;
-  for (const s of stops) {
-    if (prev) {
-      const d = distanceKm(prev, s);
-      if (d == null) return null; // a gap in the data makes the total meaningless
-      km += d;
-    }
-    prev = s;
-    if (s.depTs === splitDepTs) return km;
+
+  // Movement between two different stations. Consecutive stops sharing a name are
+  // the two halves of a change, which is dwell time, not travel.
+  const segments = [];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const a = stops[i];
+    const b = stops[i + 1];
+    if (a.name === b.name) continue;
+    const depTs = a.depTs ?? b.arrTs;
+    if (depTs == null) continue;
+
+    const swiss = isSwiss(a) && isSwiss(b);
+    const night = inWindow(minutesOfDay(depTs), startMin, endMin);
+    segments.push({
+      from: a,
+      to: b,
+      depTs,
+      arrTs: b.arrTs ?? b.depTs ?? depTs,
+      km: distanceKm(a, b),
+      covered: swiss && night,
+      swiss,
+      night,
+    });
   }
-  return null;
+
+  if (!segments.length) {
+    return { status: 'all-paid', stretches: [], paid: [], paidKm: null, freeSec: 0, planKey: 'none' };
+  }
+
+  // Merge neighbouring segments that agree, so a paid stretch spans as many
+  // trains as it needs to and becomes a single ticket.
+  const stretches = [];
+  for (const seg of segments) {
+    const last = stretches[stretches.length - 1];
+    if (last && last.covered === seg.covered) {
+      last.to = seg.to;
+      last.arrTs = seg.arrTs;
+      last.km = last.km == null || seg.km == null ? null : last.km + seg.km;
+      last.anyNonSwiss = last.anyNonSwiss || !seg.swiss;
+      last.anyOutsideWindow = last.anyOutsideWindow || !seg.night;
+    } else {
+      stretches.push({
+        covered: seg.covered,
+        from: seg.from,
+        to: seg.to,
+        depTs: seg.depTs,
+        arrTs: seg.arrTs,
+        km: seg.km,
+        anyNonSwiss: !seg.swiss,
+        anyOutsideWindow: !seg.night,
+      });
+    }
+  }
+
+  const paid = stretches.filter((s) => !s.covered);
+  const free = stretches.filter((s) => s.covered);
+  const paidKm = paid.every((s) => s.km != null)
+    ? paid.reduce((t, s) => t + s.km, 0)
+    : null;
+
+  const status = !paid.length ? 'all-free' : (!free.length ? 'all-paid' : 'partial');
+
+  return {
+    status,
+    stretches,
+    paid,
+    paidKm,
+    paidSec: paid.reduce((t, s) => t + (s.arrTs - s.depTs), 0),
+    freeSec: free.reduce((t, s) => t + (s.arrTs - s.depTs), 0),
+    // Two departures that need the same tickets are the same plan to a buyer.
+    planKey: paid.map((s) => `${s.from.name}>${s.to.name}`).join('|') || 'free',
+  };
 }
 
 /**
- * Compare the Night-GA split across a whole result set and mark the best one.
+ * Work out the Night-GA plan for every result and collect the distinct ones.
  *
- * A connection that leaves later can cross into the night window far earlier in
- * its route, leaving a much shorter stretch to pay for. Swiss fares are broadly
- * distance-based, so distance from the origin to the split station is used as
- * the ranking proxy — never as a price, which ZIPPIN does not claim to know.
+ * A later departure can cross into the window earlier in its route and leave far
+ * less to pay for. Swiss fares are broadly distance-based, so total paid km ranks
+ * the plans — as a proxy, never as a price, which ZIPPIN does not claim to know.
  *
- * Mutates each journey with `.night`, and returns the distinct split options
- * ranked shortest-first. The caller shows more than one: distance is a proxy, not
- * a price, so the runner-up may well be the cheaper ticket.
+ * Mutates each journey with `.night` and returns the distinct plans, cheapest
+ * proxy first. Every plan is offered, not just the winner: the ranking is an
+ * estimate, so the runner-up may be the better buy.
  */
-export function rankNightSplits(journeys, startMin, endMin) {
-  let best = null;
-  const options = new Map(); // split station name -> option
+export function rankNightPlans(journeys, startMin, endMin) {
+  const options = new Map(); // planKey -> option
 
   for (const j of journeys) {
-    const split = nightSplit(j, startMin, endMin);
-    j.night = split;
+    const plan = nightCoverage(j, startMin, endMin);
+    j.night = plan;
+    if (plan.status === 'all-paid') continue; // the pass buys nothing here
 
-    // Journeys already wholly inside the window need no ticket at all, and say
-    // so plainly. Only the ones that cost something are worth ranking.
-    if (split.status !== 'split') continue;
-
-    split.paidKm = paidRouteKm(j, split.depTs) ?? distanceKm(j.from, split.station);
-    split.paidSec = split.depTs - j.depTs;
-
-    // Prefer the shortest paid stretch; fall back to paid time where a station
-    // is missing coordinates so the comparison stays meaningful.
-    const score = split.paidKm ?? (split.paidSec / 60);
-    if (best == null || score < best.score) best = { journey: j, split, score };
-
-    // One entry per split station: several departures can share a split point,
-    // and only the earliest of them is worth offering.
-    const prev = options.get(split.station.name);
-    if (!prev || j.depTs < prev.journey.depTs) {
-      options.set(split.station.name, { journey: j, split, score });
+    const score = plan.paidKm ?? plan.paidSec / 60;
+    const prev = options.get(plan.planKey);
+    if (prev) {
+      // Same tickets, different departure. Keep the earliest as the example but
+      // remember them all, so the summary can account for every badged result.
+      prev.journeys.push(j);
+      if (j.depTs < prev.journey.depTs) { prev.journey = j; prev.plan = plan; }
+    } else {
+      options.set(plan.planKey, { journey: j, journeys: [j], plan, score });
     }
   }
 
-  if (best) best.split.isBest = true;
+  const ranked = [...options.values()].sort((a, b) => a.score - b.score);
+  for (const o of ranked) o.journeys.sort((a, b) => a.depTs - b.depTs);
+  if (ranked.length) ranked[0].plan.isBest = true;
   return {
-    best,
-    options: [...options.values()].sort((a, b) => a.score - b.score),
+    best: ranked[0] || null,
+    options: ranked,
+    // How many results carry a night badge — the summary heading counts plans,
+    // and the two numbers differ whenever departures share a ticket plan.
+    badged: ranked.reduce((n, o) => n + o.journeys.length, 0),
   };
 }
 
