@@ -1,7 +1,7 @@
 import {
   ApiError, connections, connectionsArrivingBy, hooks, searchStations, stats,
 } from './api.js';
-import { findSpeedy, rankNightPlans, sbbLink } from './plan.js';
+import { findSpeedy, nightCoverage, rankNightPlans, sbbLink } from './plan.js';
 import {
   apiDate, fmtDuration, fmtTime, nowInZurich, parseClock, todayInZurich, tsFromZurich,
 } from './time.js';
@@ -11,11 +11,13 @@ import {
 const HEAD_START_MIN = 5;
 
 // Slider position → how tight a change the user is willing to accept.
+// The scale used to jump 2 → 0, skipping the one-minute case entirely.
 const HURRY = [
   { label: 'Normal — official timings', gapMin: null },
   { label: 'Quick — 4 min changes',     gapMin: 4 },
   { label: 'Brisk — 3 min changes',     gapMin: 3 },
   { label: 'Sprint — 2 min changes',    gapMin: 2 },
+  { label: 'Dash — 1 min changes',      gapMin: 1 },
   { label: 'ZIPPIN — 0 min changes',    gapMin: 0, extreme: true },
 ];
 
@@ -28,6 +30,9 @@ const FEASIBILITY = {
   implausible: { note: 'different platform, same minute — realistically not catchable', tone: 'bad' },
   impossible: { note: 'different station with no time at all — not catchable', tone: 'bad' },
 };
+
+// ?debug=1 re-enables developer detail in the status line.
+const DEBUG = new URLSearchParams(location.search).get('debug') === '1';
 
 const $ = (sel) => document.querySelector(sel);
 const form = $('#search');
@@ -73,6 +78,7 @@ function wireCombobox(inputId, listId) {
     list.hidden = true;
     list.replaceChildren();
     input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
     cursor = -1;
   }
 
@@ -90,6 +96,15 @@ function wireCombobox(inputId, listId) {
     cursor = (next + items.length) % items.length;
     [...list.children].forEach((li, i) =>
       li.setAttribute('aria-selected', String(i === cursor)));
+
+    // aria-selected alone is not announced — the combobox pattern moves the
+    // screen reader's virtual cursor via aria-activedescendant. And the list
+    // scrolls, so past roughly the sixth option the highlight was landing below
+    // the visible area with scrollTop still at 0.
+    const current = list.children[cursor];
+    if (!current) return;
+    input.setAttribute('aria-activedescendant', current.id);
+    current.scrollIntoView({ block: 'nearest' });
   }
 
   input.addEventListener('input', () => {
@@ -104,7 +119,10 @@ function wireCombobox(inputId, listId) {
       items = found.slice(0, 8);
       if (!items.length) return close();
       list.replaceChildren(...items.map((s, i) => {
-        const li = el('li', { role: 'option', 'aria-selected': 'false', text: s.name });
+        const li = el('li', {
+          role: 'option', 'aria-selected': 'false', text: s.name,
+          id: `${listId}-opt-${i}`, // referenced by aria-activedescendant
+        });
         li.addEventListener('mousedown', (e) => { e.preventDefault(); choose(i); });
         return li;
       }));
@@ -249,8 +267,12 @@ function uncoveredReason(stretch) {
 
 function renderNightPanel(journey, cfg) {
   if (!cfg.on) return null;
-  // rankNightPlans already annotated every journey in this result set.
-  const plan = journey.night;
+  // rankNightPlans annotates the standard results before they render, but speedy
+  // and head-start results are streamed in afterwards and would still be
+  // unannotated here — which is why they silently lost their Night GA panel.
+  // Compute on demand for anything the ranking pass hasn't reached yet.
+  const plan = journey.night
+    || (journey.night = nightCoverage(journey, cfg.start, cfg.end));
   if (!plan || plan.status === 'all-paid') return null;
 
   const panel = el('div', { class: 'night-panel' }, [
@@ -296,7 +318,9 @@ function renderNightPanel(journey, cfg) {
         class: 'buy small',
         href: sbbLink(s.from, s.to, s.depTs),
         target: '_blank', rel: 'noopener',
-        text: `Check price on SBB  ·  ${fmtTime(s.depTs)} → ${fmtTime(s.arrTs)}`,
+        text: `Price on SBB  ·  ${fmtTime(s.depTs)} → ${fmtTime(s.arrTs)}  ↗`,
+        'aria-label': `Price on SBB for ${s.from.name} to ${s.to.name}, `
+          + `${fmtTime(s.depTs)} to ${fmtTime(s.arrTs)} (opens sbb.ch in a new tab)`,
       }));
     }
     list.append(row);
@@ -307,7 +331,9 @@ function renderNightPanel(journey, cfg) {
     class: 'buy ghost',
     href: sbbLink(journey.from, journey.to, journey.depTs),
     target: '_blank', rel: 'noopener',
-    text: `Compare: one ticket for the whole trip  ·  ${fmtTime(journey.depTs)} → ${fmtTime(journey.arrTs)}`,
+    text: `Price on SBB  ·  one ticket for the whole trip  ↗`,
+    'aria-label': `Price on SBB for one ticket covering the whole trip, `
+      + `${journey.from.name} to ${journey.to.name} (opens sbb.ch in a new tab)`,
   }));
 
   panel.append(el('p', {
@@ -328,6 +354,7 @@ function renderJourney(journey, cfg, { speedy = false } = {}) {
     class: ['journey', speedy ? 'is-speedy' : '', risky ? 'is-risky' : ''].filter(Boolean).join(' '),
   });
 
+  const bodyId = `jbody-${(renderJourney.seq = (renderJourney.seq || 0) + 1)}`;
   const head = el('button', {
     type: 'button', class: 'j-head', 'aria-expanded': 'false',
   });
@@ -381,17 +408,32 @@ function renderJourney(journey, cfg, { speedy = false } = {}) {
     }));
   }
 
+  // Left to itself the button's accessible name concatenates every child with no
+  // separators — "17:04→19:302h 26 · 1 changeIC 51IR 55›" — running the arrival
+  // time into the duration and reading the decorative chevron aloud. State it
+  // explicitly instead, and hide the two ornaments from the tree.
+  const spoken = [
+    `${fmtTime(journey.depTs)} to ${fmtTime(journey.arrTs)}`,
+    fmtDuration(journey.durationSec),
+    journey.transfers === 0
+      ? 'direct'
+      : `${journey.transfers} change${journey.transfers > 1 ? 's' : ''}`,
+    journey.products.length ? journey.products.join(', then ') : null,
+  ].filter(Boolean).join(', ');
+  head.setAttribute('aria-label', spoken);
+  head.setAttribute('aria-controls', bodyId);
+
   head.append(
     el('div', { class: 'j-times' }, [
       document.createTextNode(fmtTime(journey.depTs)),
-      el('span', { class: 'arrow', text: '→' }),
+      el('span', { class: 'arrow', 'aria-hidden': 'true', text: '→' }),
       document.createTextNode(fmtTime(journey.arrTs)),
     ]),
     el('div', { class: 'j-meta', text: metaBits.join('  ·  ') }),
     badges,
     el('div', { class: 'chips' },
       journey.products.slice(0, 3).map((p) => el('span', { class: 'chip', text: p }))),
-    el('span', { class: 'caret', text: '›' }),
+    el('span', { class: 'caret', 'aria-hidden': 'true', text: '›' }),
   );
 
   // A one-line summary of what ZIPPIN did, visible without expanding the card —
@@ -416,15 +458,11 @@ function renderJourney(journey, cfg, { speedy = false } = {}) {
   }
 
   const body = renderLegs(journey);
+  body.id = bodyId;
   const fb = renderFallback(journey);
   if (fb) body.append(fb);
-  if (journey.headStartSec > 0) {
-    body.prepend(el('div', {
-      class: 'headstart',
-      text: `⏱ Departs ${Math.round(journey.headStartSec / 60)} min before the time you asked for — `
-        + 'catchable only if you are already at the platform.',
-    }));
-  }
+  // The head-start warning already sits in the always-visible note above; a
+  // second copy inside the body only repeated it word for word once expanded.
   if (nightInfo) body.append(nightInfo.panel);
   body.hidden = true;
 
@@ -604,7 +642,9 @@ function renderNightCompare(options, badged) {
         class: 'buy small',
         href: sbbLink(s.from, s.to, s.depTs),
         target: '_blank', rel: 'noopener',
-        text: `${s.from.name} → ${s.to.name}  ·  ${fmtTime(s.depTs)}`,
+        text: `Price on SBB  ·  ${s.from.name} → ${s.to.name}  ↗`,
+        'aria-label': `Price on SBB for ${s.from.name} to ${s.to.name}, `
+          + `departing ${fmtTime(s.depTs)} (opens sbb.ch in a new tab)`,
       })),
     ]));
   }
@@ -626,6 +666,7 @@ async function runSearch(e) {
   const submit = form.querySelector('.go');
   submit.disabled = true;
   resultsEl.replaceChildren();
+  clearStale();
 
   const cfg = {
     on: $('#nightga-on').checked,
@@ -634,8 +675,10 @@ async function runSearch(e) {
   };
   const hurry = HURRY[Number(hurryEl.value)];
   const arriveBy = $('#timemode').value === 'arrive';
-  const directOnly = $('#direct-only').checked;
   const maxChanges = $('#max-changes').value === '' ? null : Number($('#max-changes').value);
+  // "Direct only" is now just the zero option of Max changes rather than a
+  // second control that silently overrode it.
+  const directOnly = maxChanges === 0;
 
   // Only send the mode filter when it actually narrows things; all-selected is
   // the same as unset, and an empty selection would return nothing at all.
@@ -681,16 +724,31 @@ async function runSearch(e) {
       });
     if (token !== searchToken) return;
 
-    // The API accepts `direct` but ignores it (verified), so filter here.
-    if (directOnly) base = base.filter((j) => j.transfers === 0);
+    // How many the timetable actually returned, before any of our own filtering.
+    // Without this the app can't tell "this journey doesn't exist" from "your
+    // own filter removed all of them" — and it used to blame the station names
+    // for both, sending users to debug the one thing that was correct.
+    const foundBeforeFilters = base.length;
+
     // Speedy mode can string together long chains of connections to save time.
     // This is the opt-out for anyone unwilling to make that trade.
     if (maxChanges != null) base = base.filter((j) => j.transfers <= maxChanges);
 
     if (!base.length) {
-      setStatus(directOnly
-        ? 'No direct connections found. Untick “Direct connections only” to allow changes.'
-        : 'No connections found. Check the station names or try another time.');
+      let why;
+      if (foundBeforeFilters && maxChanges != null) {
+        const plural = foundBeforeFilters === 1 ? '' : 's';
+        why = maxChanges === 0
+          ? `${foundBeforeFilters} connection${plural} found, but none of them are direct. `
+            + 'Raise “Max changes” to see them.'
+          : `${foundBeforeFilters} connection${plural} found, but none with `
+            + `${maxChanges} change${maxChanges === 1 ? '' : 's'} or fewer. `
+            + 'Raise “Max changes” to see them.';
+      } else {
+        why = 'No connections found for this route and time. '
+          + 'Check the stations, or try a different time or date.';
+      }
+      setStatus(why, { error: true });
       return;
     }
 
@@ -802,8 +860,10 @@ async function runSearch(e) {
     if (!extras.length) {
       finish(
         `No hidden connections on this route — the standard results already take the `
-        + `${arriveBy ? 'latest possible start' : 'earliest onward trains'}. `
-        + `(${stats.requests} timetable queries)`,
+        + `${arriveBy ? 'latest possible start' : 'earliest onward trains'}.`
+        // The query count means nothing to a traveller and varies between runs of
+        // the same search, which reads as the app behaving inconsistently.
+        + (DEBUG ? ` (${stats.requests} timetable queries)` : ''),
       );
       return;
     }
@@ -869,7 +929,7 @@ function savePrefs() {
       hurry: hurryEl.value,
       timemode: $('#timemode').value,
       limit: $('#limit').value,
-      directOnly: $('#direct-only').checked,
+      maxChanges: $('#max-changes').value,
       modes: [...document.querySelectorAll('.mode')].filter((c) => c.checked).map((c) => c.value),
       night: $('#nightga-on').checked,
       nightStart: $('#night-start').value,
@@ -889,7 +949,7 @@ function loadPrefs() {
   hurryEl.value = p.hurry ?? '1';
   if (p.timemode) $('#timemode').value = p.timemode;
   if (p.limit) $('#limit').value = p.limit;
-  $('#direct-only').checked = !!p.directOnly;
+  if (p.maxChanges != null) $('#max-changes').value = p.maxChanges;
   if (Array.isArray(p.modes) && p.modes.length) {
     for (const c of document.querySelectorAll('.mode')) c.checked = p.modes.includes(c.value);
   }
@@ -897,7 +957,7 @@ function loadPrefs() {
   if (p.nightStart) $('#night-start').value = p.nightStart;
   if (p.nightEnd) $('#night-end').value = p.nightEnd;
   if (p.night) document.querySelector('.nightga').open = true;
-  if (p.directOnly || (Array.isArray(p.modes) && p.modes.length && p.modes.length < 5)) {
+  if (p.maxChanges || (Array.isArray(p.modes) && p.modes.length && p.modes.length < 5)) {
     document.querySelector('.more').open = true;
   }
 }
@@ -917,7 +977,7 @@ function writeUrl() {
   if (hurryEl.value !== '1') p.set('hurry', hurryEl.value);
   if ($('#via').value.trim()) p.set('via', $('#via').value.trim());
   if ($('#limit').value !== '6') p.set('limit', $('#limit').value);
-  if ($('#direct-only').checked) p.set('direct', '1');
+  if ($('#max-changes').value !== '') p.set('maxch', $('#max-changes').value);
 
   const modes = [...document.querySelectorAll('.mode')].filter((c) => c.checked).map((c) => c.value);
   if (modes.length !== document.querySelectorAll('.mode').length) p.set('modes', modes.join(','));
@@ -944,7 +1004,10 @@ function readUrl() {
   hurryEl.value = p.get('hurry') ?? '1';
   $('#via').value = p.get('via') || '';
   if (p.get('limit')) $('#limit').value = p.get('limit');
-  $('#direct-only').checked = p.get('direct') === '1';
+  // `direct=1` is the retired checkbox's param; keep honouring it so links
+  // shared before it was removed still reproduce the same search.
+  if (p.get('maxch') !== null) $('#max-changes').value = p.get('maxch');
+  else if (p.get('direct') === '1') $('#max-changes').value = '0';
 
   if (p.get('modes')) {
     const want = p.get('modes').split(',');
@@ -954,7 +1017,7 @@ function readUrl() {
   if (p.get('ns')) $('#night-start').value = p.get('ns');
   if (p.get('ne')) $('#night-end').value = p.get('ne');
   if (p.get('night') === '1') document.querySelector('.nightga').open = true;
-  if (p.get('via') || p.get('direct') || p.get('modes')) document.querySelector('.more').open = true;
+  if (p.get('via') || p.get('direct') || p.get('maxch') || p.get('modes')) document.querySelector('.more').open = true;
   return true;
 }
 
@@ -963,8 +1026,12 @@ async function copyLink() {
   try {
     await navigator.clipboard.writeText(location.href);
     btn.textContent = '✓ Link copied';
+    // The button's own text change is invisible to a screen reader — it carries
+    // no live region. #status already is one.
+    setStatus('Link to this search copied to the clipboard.');
   } catch {
-    btn.textContent = 'Press ⌘C to copy';
+    btn.textContent = 'Link selected — copy it now';
+    setStatus('Could not copy automatically. The link is selected — copy it now.');
     // Clipboard access can be denied; select the URL so the user can copy it.
     const r = document.createRange();
     r.selectNodeContents(btn);
@@ -991,6 +1058,26 @@ function syncHurry() {
   hurryLabel.classList.toggle('is-extreme', !!h.extreme);
   $('#extreme-warn').hidden = !h.extreme;
 }
+
+/**
+ * Changing a search setting does not re-run the search, so what is on screen
+ * stops describing what the form now says.
+ *
+ * That mattered most for the hurry slider — the whole point of the app. Raise it
+ * to maximum and the previous run's results and its "no hidden connections"
+ * verdict both sat there unchanged, so the feature looked like it had found
+ * nothing when in fact nothing had been asked. Results are dimmed and made
+ * inert, and the status line says what to do about it.
+ */
+function markStale() {
+  if (!resultsEl.children.length || resultsEl.classList.contains('is-stale')) return;
+  resultsEl.classList.add('is-stale');
+  setStatus('Settings changed — press Search to update these results.');
+}
+
+function clearStale() {
+  resultsEl.classList.remove('is-stale');
+}
 hurryEl.addEventListener('input', syncHurry);
 
 function syncTimeMode() {
@@ -1002,11 +1089,29 @@ $('#swap').addEventListener('click', () => {
   const a = $('#from'), b = $('#to');
   [a.value, b.value] = [b.value, a.value];
   [a.dataset.stationId, b.dataset.stationId] = [b.dataset.stationId, a.dataset.stationId];
+  // Swap changed nothing visible for a screen reader: it rewrites two field
+  // values and nothing announces it. Route it through the existing live region.
+  setStatus(a.value && b.value
+    ? `Swapped — now ${a.value} to ${b.value}. Press Search to update.`
+    : 'Swapped origin and destination.');
+  markStale();
 });
 
 $('#nightga-on').addEventListener('change', (e) => {
   if (e.target.checked) document.querySelector('.nightga').open = true;
 });
+
+// Every control that feeds a search invalidates what is already on screen.
+for (const sel of ['#from', '#to', '#date', '#time', '#timemode', '#hurry',
+  '#via', '#limit', '#max-changes', '#nightga-on', '#night-start', '#night-end']) {
+  const node = $(sel);
+  if (!node) continue;
+  node.addEventListener('change', markStale);
+  if (node.type === 'range' || node.type === 'text') node.addEventListener('input', markStale);
+}
+for (const box of document.querySelectorAll('.modes input[type=checkbox]')) {
+  box.addEventListener('change', markStale);
+}
 
 // A back-off is silent otherwise, and a search that pauses for ten seconds with
 // no explanation reads as a hang.

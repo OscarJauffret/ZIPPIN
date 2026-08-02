@@ -1,4 +1,9 @@
 :root {
+  /* Tells the UA both themes are supported, so it inverts the native date/time
+     picker glyphs and themes every popup, select dropdown and scrollbar to match.
+     Without it those render light-on-light inside the dark page. */
+  color-scheme: light dark;
+
   --bg: #f5f6f8;
   --surface: #ffffff;
   --surface-2: #f0f2f5;
@@ -13,6 +18,11 @@
   --night-soft: #eceafc;
   --warn: #8a5a00;
   --warn-soft: #fdf1dc;
+  /* Text placed ON the accent/night fills. Light mode fills are dark enough for
+     white; the dark theme lightens those tokens so they work as foreground
+     colours, which makes white on them fail (2.4-3.0:1) -- so dark text there. */
+  --on-accent: #ffffff;
+  --on-night: #ffffff;
   --shadow: 0 1px 2px rgba(16, 22, 30, .06), 0 8px 24px rgba(16, 22, 30, .06);
   --radius: 14px;
 }
@@ -33,6 +43,8 @@
     --night-soft: #1c1937;
     --warn: #f0b849;
     --warn-soft: #2c2312;
+    --on-accent: #12161b;  /* 6.10:1 on --accent  */
+    --on-night: #12161b;   /* 7.63:1 on --night   */
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .35);
   }
 }
@@ -111,7 +123,8 @@ input[type=time]::-webkit-date-and-time-value {
   min-width: 0;
   max-width: 100%;
 }
-input:focus-visible, button:focus-visible, summary:focus-visible {
+input:focus-visible, button:focus-visible, summary:focus-visible,
+select:focus-visible, a:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -132,7 +145,7 @@ input:focus-visible, button:focus-visible, summary:focus-visible {
   flex: 0 0 auto;
   padding: .62rem 1.5rem;
   font: inherit; font-weight: 600;
-  color: #fff; background: var(--accent);
+  color: var(--on-accent); background: var(--accent);
   border: 0; border-radius: 10px; cursor: pointer;
 }
 .go:hover { filter: brightness(1.06); }
@@ -179,14 +192,21 @@ input:focus-visible, button:focus-visible, summary:focus-visible {
 }
 input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
 .ticks { display: flex; justify-content: space-between; font-size: .7rem; color: var(--muted); }
-.help { margin: .4rem 0 0; font-size: .78rem; color: var(--muted); }
+.help { margin: .4rem 0 0; font-size: .78rem; color: var(--muted); max-width: 62ch; }
 
 /* --- night GA ---------------------------------------------------------- */
 
 .nightga { border-top: 1px solid var(--border); padding-top: .9rem; }
 .nightga summary { cursor: pointer; list-style: none; }
 .nightga summary::-webkit-details-marker { display: none; }
-.inline-check { display: flex; align-items: center; gap: .5rem; font-size: .9rem; font-weight: 600; color: var(--text); cursor: pointer; }
+/* inline-flex, not flex: as a block-level flex item this label filled the whole
+   row, so ~600px of empty card background silently toggled the checkbox.
+   padding-block clears the 24x24 minimum tap target (WCAG 2.5.8). */
+.inline-check {
+  display: inline-flex; align-items: center; gap: .5rem;
+  padding-block: .25rem;
+  font-size: .9rem; font-weight: 600; color: var(--text); cursor: pointer;
+}
 .inline-check input { accent-color: var(--night); width: 1rem; height: 1rem; }
 .nightga-body { padding-top: .75rem; display: grid; gap: .6rem; }
 
@@ -218,6 +238,13 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
 /* --- results ----------------------------------------------------------- */
 
 .results { display: grid; gap: .8rem; margin-bottom: 3rem; }
+
+/* Results that no longer match the form. Dimmed and inert so they read as a
+   record of the last search rather than an answer to the current settings. */
+.results.is-stale {
+  opacity: .45;
+  pointer-events: none;
+}
 
 .group-title {
   margin: 1.2rem 0 -.1rem; font-size: .8rem; font-weight: 700;
@@ -344,7 +371,9 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
 .split-options li::marker { color: var(--night); font-weight: 700; }
 .split-head { font-weight: 700; }
 .split-meta { color: var(--muted); font-size: .8rem; margin-bottom: .35rem; }
-.buy.small { font-size: .76rem; padding: .3rem .6rem; }
+/* Bordered so an offsite ticket link is not mistaken for the inert
+   ".badge.night" pill, which is the same size, shape and colour family. */
+.buy.small { font-size: .76rem; padding: .3rem .6rem; border: 1px solid var(--night); }
 
 /* --- night GA panel ---------------------------------------------------- */
 
@@ -385,7 +414,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
   display: inline-block; text-decoration: none;
   font-size: .82rem; font-weight: 600;
   padding: .45rem .8rem; border-radius: 8px;
-  background: var(--night); color: #fff;
+  background: var(--night); color: var(--on-night);
 }
 .buy:hover { filter: brightness(1.08); }
 .caveat { font-size: .76rem; opacity: .85; }
@@ -394,7 +423,9 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
 
 .foot { margin: 2rem auto 3rem; font-size: .78rem; color: var(--muted); display: grid; gap: .5rem; }
 .foot a { color: inherit; }
-.fine { opacity: .8; }
+/* ~140 characters per line at 1440 otherwise; the eye loses its place on the
+   return sweep. 62ch sits inside the ~90 character comfortable maximum. */
+.fine { opacity: .8; max-width: 62ch; }
 
 .spinner {
   display: inline-block; width: .8rem; height: .8rem; margin-right: .4rem;

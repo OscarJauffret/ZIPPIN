@@ -51,7 +51,7 @@
 
     <div class="field-row">
       <div class="field">
-        <label for="timemode">Time</label>
+        <label for="timemode">Depart / arrive</label>
         <select id="timemode">
           <option value="depart" selected>Depart at</option>
           <option value="arrive">Arrive by</option>
@@ -118,10 +118,9 @@
           <label class="inline-check"><input type="checkbox" class="mode" value="cableway" checked><span>Cable car</span></label>
         </fieldset>
 
-        <label class="inline-check">
-          <input type="checkbox" id="direct-only">
-          <span>Direct connections only</span>
-        </label>
+        <!-- "Direct connections only" lived here as a second control meaning the
+             same thing as Max changes = 0, and silently overrode it. Removed;
+             the legacy ?direct=1 link param still maps onto Max changes. -->
       </div>
     </details>
 
@@ -130,10 +129,10 @@
         Hurry factor
         <span class="hurry-value" id="hurry-label">Quick — 4 min changes</span>
       </label>
-      <input id="hurry" type="range" min="0" max="4" step="1" value="1"
+      <input id="hurry" type="range" min="0" max="5" step="1" value="1"
              aria-describedby="hurry-help">
       <div class="ticks" aria-hidden="true">
-        <span>Normal</span><span>Quick</span><span>Brisk</span><span>Sprint</span><span>ZIPPIN</span>
+        <span>Normal</span><span>4′</span><span>3′</span><span>2′</span><span>1′</span><span>0′</span>
       </div>
       <p class="help" id="hurry-help">
         Above <em>Normal</em>, ZIPPIN re-checks every change against the live timetable and shows
