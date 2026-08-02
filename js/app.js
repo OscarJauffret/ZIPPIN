@@ -410,15 +410,6 @@ function renderJourney(journey, cfg, { speedy = false } = {}) {
         lines.push(`🏃 ${tight.map((c) => `${c.station.name} in ${Math.round(c.gapSec / 60)} min `
           + `instead of the official ${Math.round(c.officialGapSec / 60)}`).join(';  ')}`);
       }
-      if (journey.extraChanges > 0) {
-        const gain = Math.round((journey.gainSec || 0) / 60);
-        const gainText = gain > 0
-          ? (journey.gainKind === 'later' ? `Leave ${gain} min later ` : `Arrive ${gain} min earlier `)
-          : 'Faster ';
-        lines.push(`🔀 ${gainText}by taking ${journey.extraChanges} more `
-          + `change${journey.extraChanges > 1 ? 's' : ''} — a longer chain of connections the `
-          + 'standard search did not offer. No rushing involved.');
-      }
       if (!lines.length) lines.push('🏃 Tighter than the standard search allows.');
       note.replaceChildren(...lines.map((t) => el('div', { text: t })));
     }
@@ -445,8 +436,55 @@ function renderJourney(journey, cfg, { speedy = false } = {}) {
 
   article.append(head);
   if (note) article.append(note);
+  // Filled in by annotateTradeoffs once the whole list is known — the comparison
+  // is between results, so it can't be decided while rendering one card.
+  article.append(el('div', { class: 'j-trade', hidden: true }));
   article.append(body);
   return article;
+}
+
+/**
+ * Mark results that buy their speed with extra changes.
+ *
+ * The planner already returns these — the Montpellier search offered 18:01→05:28
+ * with 7 changes right beside 18:01→08:28 with 4 — but nothing said so, leaving
+ * the trade invisible unless you compared rows yourself. Speedy mode cannot
+ * surface it either: a longer chain that a standard result already beats is
+ * dropped as dominated, which is why that category never appears.
+ *
+ * For each result, find the calmest alternative still open to the traveller
+ * (leaving no earlier, with fewer changes) and state what the extra changes buy.
+ */
+const TRADE_MIN_SAVED_SEC = 20 * 60;
+
+function annotateTradeoffs(items) {
+  const all = items.map((it) => it.j);
+  for (const { j, node } of items) {
+    const slot = node.querySelector('.j-trade');
+    if (!slot) continue;
+
+    const calmer = all
+      .filter((r) => r !== j
+        && r.depTs >= j.depTs      // you could still choose it
+        && r.transfers < j.transfers
+        && r.arrTs - j.arrTs >= TRADE_MIN_SAVED_SEC)
+      .sort((a, b) => a.transfers - b.transfers || a.arrTs - b.arrTs)[0];
+
+    if (!calmer) {
+      slot.hidden = true;
+      slot.textContent = '';
+      continue;
+    }
+    const extra = j.transfers - calmer.transfers;
+    // The calmest option may leave later than this one, so name its departure —
+    // "arrives 11:26" alone leaves the reader guessing which result is meant.
+    slot.textContent = `🔀 ${fmtDuration(calmer.arrTs - j.arrTs)} faster than the calmest `
+      + `option — the ${fmtTime(calmer.depTs)} with `
+      + `${calmer.transfers} change${calmer.transfers === 1 ? '' : 's'}, arriving `
+      + `${fmtTime(calmer.arrTs)}. Costs you ${extra} more `
+      + `change${extra > 1 ? 's' : ''}.`;
+    slot.hidden = false;
+  }
 }
 
 /**
@@ -512,6 +550,8 @@ function makeResultList(container, cfg, arriveBy) {
       else container.insertBefore(node, items[i].node);
       items.splice(i, 0, { j: journey, node });
     },
+    /** Re-run the cross-result comparison; call whenever the list changes. */
+    annotate() { annotateTradeoffs(items); },
   };
 }
 
@@ -678,6 +718,7 @@ async function runSearch(e) {
     if (cfg.on) rankNightPlans(base, cfg.start, cfg.end);
     for (const j of base) list.add(j);
     showNight();
+    list.annotate();
 
     if (hurry.gapMin == null || directOnly) {
       finish(directOnly
@@ -749,6 +790,7 @@ async function runSearch(e) {
       el('span', { class: 'count', text: `  ${list.count} found` }),
     );
     showNight();
+    list.annotate();
 
     const extras = [...headStarts, ...speedy];
     if (!extras.length) {
@@ -777,6 +819,10 @@ async function runSearch(e) {
           : `up to ${Math.round(best / 60)} min earlier at your destination.`}`
         : `Found ${n}.`);
     }
+    // `chained` results — faster only by adding changes — are dropped upstream
+    // whenever a standard result already beats them, which in practice is always.
+    // The speed-for-changes trade is surfaced by annotateTradeoffs instead, from
+    // the standard results, where it genuinely occurs.
     if (chained.length) {
       parts.push(`${chained.length} faster route${chained.length > 1 ? 's' : ''} `
         + 'with more changes (no rushing needed).');

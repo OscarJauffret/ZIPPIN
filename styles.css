@@ -246,6 +246,15 @@ input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
 }
 .j-note.is-bad { color: var(--accent); background: var(--accent-soft); }
 
+/* The speed-for-changes trade, stated by comparing results against each other.
+   Neutral in tone: it is a choice, not a recommendation either way. */
+.j-trade {
+  padding: .5rem 1rem;
+  font-size: .78rem;
+  color: var(--muted); background: var(--surface-2);
+  border-top: 1px solid var(--border);
+}
+
 .j-head {
   display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
   padding: .85rem 1rem;
