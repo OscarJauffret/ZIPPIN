@@ -1,5 +1,5 @@
 import {
-  ApiError, connections, connectionsArrivingBy, searchStations, stats,
+  ApiError, connections, connectionsArrivingBy, hooks, searchStations, stats,
 } from './api.js';
 import { findSpeedy, rankNightPlans, sbbLink } from './plan.js';
 import {
@@ -456,6 +456,11 @@ function renderJourney(journey, cfg, { speedy = false } = {}) {
  * (leaving no earlier, with fewer changes) and state what the extra changes buy.
  */
 const TRADE_MIN_SAVED_SEC = 20 * 60;
+// The comparison only means anything between options you'd weigh against each
+// other at the same moment. Picking the calmest result anywhere in the list
+// compared an 18:01 departure against a 19:50 one — a different trip, not a
+// different routing of the same one.
+const TRADE_MAX_DEP_GAP_SEC = 15 * 60;
 
 function annotateTradeoffs(items) {
   const all = items.map((it) => it.j);
@@ -465,7 +470,8 @@ function annotateTradeoffs(items) {
 
     const calmer = all
       .filter((r) => r !== j
-        && r.depTs >= j.depTs      // you could still choose it
+        && r.depTs >= j.depTs                              // you could still choose it
+        && r.depTs - j.depTs <= TRADE_MAX_DEP_GAP_SEC      // and at much the same time
         && r.transfers < j.transfers
         && r.arrTs - j.arrTs >= TRADE_MIN_SAVED_SEC)
       .sort((a, b) => a.transfers - b.transfers || a.arrTs - b.arrTs)[0];
@@ -1001,6 +1007,12 @@ $('#swap').addEventListener('click', () => {
 $('#nightga-on').addEventListener('change', (e) => {
   if (e.target.checked) document.querySelector('.nightga').open = true;
 });
+
+// A back-off is silent otherwise, and a search that pauses for ten seconds with
+// no explanation reads as a hang.
+hooks.onRateLimit = (seconds) => {
+  setStatus(`Rate limited by the timetable service — retrying in ${seconds}s…`, { busy: true });
+};
 
 form.addEventListener('submit', runSearch);
 $('#share').addEventListener('click', copyLink);

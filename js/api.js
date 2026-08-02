@@ -16,7 +16,38 @@ let active = 0;
 const queue = [];
 
 /** Requests actually sent to the network this session (cache hits excluded). */
-export const stats = { requests: 0, cached: 0 };
+export const stats = { requests: 0, cached: 0, retries: 0 };
+
+/**
+ * Set by the UI so a wait can be reported instead of looking like a hang.
+ * Called with the seconds about to be waited.
+ */
+export const hooks = { onRateLimit: null };
+
+// A Speedy search fans out into ~20 queries, which is enough to trip the public
+// endpoint's limit part way through. Failing the whole search for that loses
+// work already done, when the limit clears in seconds — so back off and retry.
+const RETRY_DELAYS_MS = [2000, 5000, 10000];
+const MAX_RETRY_WAIT_MS = 30000;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function fetchWithRetry(url) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (res.status !== 429 || attempt >= RETRY_DELAYS_MS.length) return res;
+
+    // Honour Retry-After when the server sends one; otherwise back off.
+    const after = Number(res.headers.get('Retry-After'));
+    const waitMs = Number.isFinite(after) && after > 0
+      ? Math.min(after * 1000, MAX_RETRY_WAIT_MS)
+      : RETRY_DELAYS_MS[attempt];
+
+    stats.retries++;
+    hooks.onRateLimit?.(Math.round(waitMs / 1000));
+    await sleep(waitMs);
+  }
+}
 
 function schedule(run) {
   return new Promise((resolve, reject) => {
@@ -40,8 +71,13 @@ async function get(path, params) {
 
   const p = schedule(async () => {
     stats.requests++;
-    const res = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (res.status === 429) throw new ApiError('Rate limited by transport.opendata.ch. Wait a minute and try again.', 429);
+    const res = await fetchWithRetry(url);
+    if (res.status === 429) {
+      throw new ApiError(
+        'transport.opendata.ch is still rate limiting after several retries. '
+        + 'Wait a minute and search again.', 429,
+      );
+    }
     if (!res.ok) throw new ApiError(`Timetable service returned ${res.status}.`, res.status);
     const json = await res.json();
     cache.set(url, json);

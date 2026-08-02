@@ -80,10 +80,16 @@
           </div>
           <div class="field">
             <label for="limit">Results</label>
+            <!-- Even steps up to 16, which is the API's hard maximum
+                 ("Maximal value of argument `limit` is 16."). -->
             <select id="limit">
               <option value="4">4</option>
               <option value="6" selected>6</option>
+              <option value="8">8</option>
               <option value="10">10</option>
+              <option value="12">12</option>
+              <option value="14">14</option>
+              <option value="16">16</option>
             </select>
           </div>
           <div class="field">
@@ -95,7 +101,10 @@
               <option value="2">2</option>
               <option value="3">3</option>
               <option value="4">4</option>
+              <option value="5">5</option>
               <option value="6">6</option>
+              <option value="7">7</option>
+              <option value="8">8</option>
             </select>
           </div>
         </div>
